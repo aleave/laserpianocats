@@ -1,0 +1,297 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Laser Piano Cats</title>
+<style>
+  html,body{height:100%;margin:0;background:#0b0f16;color:#e6e6e6;font-family:system-ui,Segoe UI,Roboto,sans-serif}
+  .wrap{display:flex;flex-direction:column;align-items:center;gap:12px;padding:12px}
+  canvas{background:#111827;border-radius:16px;box-shadow:0 10px 30px rgba(0,0,0,.4);touch-action:none}
+  .controls{display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:center}
+  button{background:#2563eb;color:#fff;border:0;padding:10px 14px;border-radius:10px;font-weight:600;cursor:pointer}
+  button:disabled{opacity:.5;cursor:not-allowed}
+  .hint{opacity:.8;font-size:14px}
+</style></head>
+<body>
+<div class="wrap">
+  <h1 style="margin:8px 0 0 0;font-size:20px">Laser Piano — <span style="opacity:.8">Chromatic Levels</span></h1>
+  <div class="controls">
+    <button id="start">Start</button>
+    <button id="restart" disabled>Restart</button>
+    <span class="hint">Tap keys (or use number row 1–0, -, =) to fire. Hit the highlighted key to zap the cat.</span>
+  </div>
+  <canvas id="c" width="1100" height="600"></canvas>
+</div>
+<script>
+(() => {
+  'use strict';
+  // ---------- Canvas / DPR ----------
+  const cv = document.getElementById('c'), cx = cv.getContext('2d');
+  const DPR = Math.min(devicePixelRatio||1,2);
+  function fit(){ const w=Math.min(innerWidth-24,1100); const h=Math.round(w*9/16);
+    cv.style.width=w+'px'; cv.style.height=h+'px'; cv.width=Math.floor(w*DPR); cv.height=Math.floor(h*DPR);
+  } fit(); addEventListener('resize',fit);
+  const tNow = ()=>performance.now();
+
+  // ---------- Music / Keyboard C4..C6 ----------
+  const ORDER=['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
+  function midi(n){ const m=/^([A-G])(#?)(\d)$/.exec(n); if(!m) return 60; const idx=ORDER.indexOf(m[1]+(m[2]||'')), o=+m[3]; return (o+1)*12+idx; }
+  const freq = (m)=>440*Math.pow(2,(m-69)/12);
+
+  const KEYS=[];
+  for(let o=4;o<=6;o++){ for(const N of ORDER){ const name=N+o; KEYS.push({name,isBlack:N.includes('#')}); if(N==='C'&&o===6) break; } }
+  const WHITE = KEYS.filter(k=>!k.isBlack), BLACK = KEYS.filter(k=>k.isBlack);
+  const NOTE_SET = new Set(KEYS.map(k=>k.name)); // quick membership
+
+  function layout(){
+    const W=cv.width,H=cv.height; const pianoH=Math.floor(H*0.28), pianoY=H-pianoH;
+    const whiteW=Math.max(8,Math.floor(W/WHITE.length));
+    return {W,H,pianoH,pianoY,whiteW};
+  }
+  function keyRects(){
+    const {pianoH,pianoY,whiteW}=layout();
+    const whites=[], blacks=[]; let x=0;
+    for(const k of WHITE){ whites.push({name:k.name,x,y:pianoY,w:whiteW,h:pianoH}); x+=whiteW; }
+    const wBy=(nm)=>whites.find(w=>w.name===nm);
+    const pairs={'C#':['C','D'],'D#':['D','E'],'F#':['F','G'],'G#':['G','A'],'A#':['A','B']};
+    for(const k of BLACK){
+      const acc=k.name.slice(0,2), o=k.name.slice(-1), p=pairs[acc]; if(!p) continue;
+      const L=wBy(p[0]+o), R=wBy(p[1]+o);
+      let bx,bw;
+      if(L&&R){ bx=Math.round(L.x+(R.x-L.x)*0.66); bw=Math.max(6,Math.round((R.x-L.x)*0.58)); }
+      else { const a=L||R||whites[0]; bx=Math.round(a.x+a.w*0.55); bw=Math.max(6,Math.round(a.w*0.6)); }
+      blacks.push({name:k.name,x:bx,y:pianoY,w:bw,h:Math.round(pianoH*0.6)});
+    }
+    return {whites,blacks};
+  }
+
+  // ---------- Levels ----------
+  const LEVELS=[
+    { title:"Twinkle Twinkle", spawn:900, fall:110, m:[
+      'C4','C4','G4','G4','A4','A4','G4','F4','F4','E4','E4','D4','D4','C4',
+      'G4','G4','F4','F4','E4','E4','D4','G4','G4','F4','F4','E4','E4','D4',
+      'C4','C4','G4','G4','A4','A4','G4','F4','F4','E4','E4','D4','D4','C4'
+    ]},
+    { title:"Ode to Joy", spawn:820, fall:125, m:[
+      'E4','E4','F4','G4','G4','F4','E4','D4','C4','C4','D4','E4','E4','D4','D4',
+      'E4','E4','F4','G4','G4','F4','E4','D4','C4','C4','D4','E4','D4','C4','C4'
+    ]},
+    { title:"When the Saints", spawn:780, fall:135, m:[
+      'C4','E4','F4','G4','C5','E4','F4','G4','C5','E4','F4','G4','E4','C4','E4','D4','C4'
+    ]},
+    { title:"Frère Jacques", spawn:740, fall:145, m:[
+      'C4','D4','E4','C4','C4','D4','E4','C4','E4','F4','G4','E4','F4','G4',
+      'G4','A4','G4','F4','E4','C4','G4','A4','G4','F4','E4','C4','C4','G4','C4','C4','G4','C4'
+    ]},
+    { title:"Happy Birthday", spawn:700, fall:155, m:[
+      'G4','G4','A4','G4','C5','B4','G4','G4','A4','G4','D5','C5',
+      'G4','G4','G5','E5','C5','B4','A4','F5','F5','E5','C5','D5','C5'
+    ]},
+    { title:"Jingle Bells (verse)", spawn:660, fall:165, m:[
+      'E4','E4','E4','E4','E4','E4','E4','G4','C4','D4','E4',
+      'F4','F4','F4','F4','F4','E4','E4','E4','E4','E4','D4','D4','E4','D4','G4'
+    ]},
+    { title:"Greensleeves", spawn:640, fall:175, m:[
+      'E4','C4','D4','E4','F4','E4','D4','C4','A4','A4','E4','C4','D4','E4','F4','E4','D4','C4','A4',
+      'E4','F4','G4','E4','C4','A4','G#4','A4'
+    ]},
+    { title:"Für Elise (opening)", spawn:600, fall:185, m:[
+      'E5','D#5','E5','D#5','E5','B4','D5','C5','A4','C4','E4','A4','B4','E4','G#4','B4','C5',
+      'E4','E5','D#5','E5','D#5','E5','B4','D5','C5','A4'
+    ]},
+    { title:"Canon in D (simplified)", spawn:560, fall:195, m:[
+      'D4','A4','B4','F#4','G4','D4','G4','A4','D4','A4','B4','F#4','G4','F#4','E4','D4',
+      'D4','F#4','A4','B4','A4','G4','F#4','E4','F#4','G4','A4','F#4','E4','D4'
+    ]},
+    { title:"Turkish March (simplified)", spawn:520, fall:210, m:[
+      'E5','E5','F5','G5','F5','E5','D5','C5','D5','E5',
+      'E5','E5','F5','G5','F5','E5','D5','C5','D5','C5',
+      'G4','G4','A4','B4','A4','G4','F4','E4','F4','G4',
+      'G4','G4','A4','B4','A4','G4','F4','E4','D4','C4'
+    ]}
+  ];
+
+  // ---------- Audio ----------
+  const AudioCtx = window.AudioContext || window.webkitAudioContext;
+  let audioCtx = null;
+  function playNote(name, dur=0.55){
+    try{ if(!audioCtx) audioCtx = new AudioCtx(); }catch{}
+    if(!audioCtx) return;
+    const t=audioCtx.currentTime, g=audioCtx.createGain(), a=audioCtx.createOscillator(), b=audioCtx.createOscillator();
+    a.type='triangle'; b.type='sine';
+    const f=freq(midi(name)); a.frequency.value=f; b.frequency.value=f*1.003;
+    g.gain.setValueAtTime(0.0008,t); g.gain.exponentialRampToValueAtTime(0.28,t+0.02); g.gain.exponentialRampToValueAtTime(0.001,t+dur);
+    a.connect(g); b.connect(g); g.connect(audioCtx.destination); a.start(t); b.start(t); a.stop(t+dur+0.05); b.stop(t+dur+0.05);
+  }
+
+  // ---------- State ----------
+  const NUMROW=['1','2','3','4','5','6','7','8','9','0','-','='];
+  const st={
+    phase:'idle', level:0, notePtr:0, score:0,
+    cats:[], lasers:[],
+    lastSpawn:0, nextPhaseAt:0
+  };
+  function lvl(){ return LEVELS[st.level]; }
+
+  // ---------- Flow ----------
+  function startFromL1(){
+    st.level=0; st.score=0; announce(200);
+  }
+  function announce(delay=1200){
+    st.phase='announce'; st.notePtr=0; st.cats.length=0; st.lasers.length=0;
+    const t=tNow(); st.lastSpawn=t; st.nextPhaseAt=t+delay;
+  }
+  function startLevel(){
+    st.phase='play'; st.notePtr=0; st.cats.length=0; st.lasers.length=0; st.lastSpawn=tNow();
+  }
+  function cleared(){ st.phase='cleared'; st.nextPhaseAt=tNow()+1200; }
+  function gameOver(){ st.phase='gameover'; st.nextPhaseAt=tNow()+1500; }
+  function nextLevel(){
+    st.level = (st.level<LEVELS.length-1)? st.level+1 : 0;
+    announce(1200);
+  }
+
+  // ---------- Spawning & input ----------
+  function rectForNote(note){
+    const {whites,blacks}=keyRects();
+    return note.includes('#') ? blacks.find(r=>r.name===note) : whites.find(r=>r.name===note);
+  }
+  function spawnCat(){
+    if(st.notePtr >= lvl().m.length) return;
+    const note = lvl().m[st.notePtr];
+    if(!NOTE_SET.has(note)){ st.notePtr++; return; }
+    const r=rectForNote(note); if(!r){ st.notePtr++; return; }
+    st.cats.push({note, x:Math.floor(r.x+r.w/2), y:10});
+    st.notePtr++;
+  }
+  function fire(note){
+    const r=rectForNote(note); if(!r) return;
+    const {pianoY}=layout();
+    st.lasers.push({note, x:Math.floor(r.x+r.w/2), y:pianoY-6});
+    playNote(note,0.6);
+  }
+
+  // pointer → prefer blacks
+  cv.addEventListener('pointerdown', (e)=>{
+    if(st.phase!=='play') return;
+    const rc=cv.getBoundingClientRect();
+    const px=(e.clientX-rc.left)*(cv.width/rc.width);
+    const py=(e.clientY-rc.top)*(cv.height/rc.height);
+    const {whites,blacks}=keyRects();
+    const b=blacks.find(r=>px>=r.x&&px<=r.x+r.w&&py>=r.y&&py<=r.y+r.h); if(b) return fire(b.name);
+    const w=whites.find(r=>px>=r.x&&px<=r.x+r.w&&py>=r.y&&py<=r.y+r.h); if(w) fire(w.name);
+  });
+
+  // number row maps to middle span of keys
+  addEventListener('keydown',(e)=>{
+    if(st.phase!=='play') return;
+    const pos=NUMROW.indexOf(e.key); if(pos<0) return;
+    const start=Math.floor(KEYS.length/2)-Math.floor(NUMROW.length/2);
+    const idx=Math.min(KEYS.length-1,Math.max(0,start+pos));
+    fire(KEYS[idx].name);
+  });
+
+  document.getElementById('start').addEventListener('click', ()=>{
+    try{ if(!audioCtx) audioCtx=new AudioCtx(); }catch{}
+    startFromL1();
+    document.getElementById('start').disabled=true;
+    document.getElementById('restart').disabled=false;
+  });
+  document.getElementById('restart').addEventListener('click', startFromL1);
+
+  // ---------- Physics ----------
+  let last=tNow();
+  function physics(dt){
+    // lasers up
+    for(const L of st.lasers) L.y -= 540*dt;
+    // collisions
+    for(let i=st.lasers.length-1;i>=0;i--){
+      const L=st.lasers[i];
+      for(let j=st.cats.length-1;j>=0;j--){
+        const C=st.cats[j];
+        if(Math.abs(L.x-C.x)<10 && Math.abs(L.y-C.y)<22){ st.cats.splice(j,1); st.lasers.splice(i,1); st.score+=10; break; }
+      }
+    }
+    st.lasers = st.lasers.filter(L=>L.y>-30);
+    // cats down
+    for(const C of st.cats) C.y += lvl().fall*dt;
+    const {pianoY}=layout();
+    if(st.cats.some(C=>C.y>=pianoY-4)){ gameOver(); }
+  }
+
+  // ---------- Draw ----------
+  function drawPiano(nextNote){
+    const {W,H,pianoH,pianoY}=layout();
+    cx.fillStyle='#0f172a'; cx.fillRect(0,pianoY,W,pianoH);
+    const {whites,blacks}=keyRects();
+    // highlight next
+    if(nextNote){
+      const r=nextNote.includes('#')?blacks.find(x=>x.name===nextNote):whites.find(x=>x.name===nextNote);
+      if(r){ cx.fillStyle='rgba(56,189,248,0.30)'; cx.fillRect(r.x,r.y,r.w,r.h); }
+    }
+    for(const r of whites){ cx.fillStyle='#e5e7eb'; cx.fillRect(r.x+2,r.y+2,r.w-4,r.h-4); }
+    for(const r of blacks){ cx.fillStyle='#0b1323'; cx.fillRect(r.x+1,r.y+1,r.w-2,r.h-2); }
+    // sparse labels
+    cx.fillStyle='#111827'; cx.font=`${Math.floor(14*DPR)}px system-ui`; cx.textAlign='center'; cx.textBaseline='middle';
+    for(const r of whites){ if(r.name.startsWith('C')||r.name.startsWith('G')) cx.fillText(r.name, r.x+r.w/2, pianoY+pianoH*0.72); }
+    // guides
+    cx.globalAlpha=.06; cx.fillStyle='#93c5fd';
+    for(const r of [...whites,...blacks]) cx.fillRect(r.x+r.w/2-1,0,2,pianoY);
+    cx.globalAlpha=1;
+  }
+  function drawCats(){
+    cx.save(); cx.font=`${Math.floor(28*DPR)}px serif`; cx.textAlign='center'; cx.textBaseline='middle';
+    for(const C of st.cats) cx.fillText('🐱',C.x,C.y);
+    cx.restore();
+  }
+  function drawLasers(){
+    cx.save(); cx.strokeStyle='#38bdf8'; cx.lineWidth=3*DPR; cx.shadowColor='#7dd3fc'; cx.shadowBlur=8*DPR;
+    for(const L of st.lasers){ cx.beginPath(); cx.moveTo(L.x,L.y); cx.lineTo(L.x,L.y-20*DPR); cx.stroke(); }
+    cx.restore();
+  }
+  function centerText(text,color='#e5e7eb',yFrac=.32,size=22){
+    const {W,H}=layout(); cx.save(); cx.fillStyle=color; cx.font=`${Math.floor(size*DPR)}px system-ui`;
+    cx.textAlign='center'; cx.textBaseline='middle'; cx.fillText(text,W/2,H*yFrac); cx.restore();
+  }
+  // stars bg
+  const stars=Array.from({length:80},()=>({x:Math.random(),y:Math.random(),r:0.5+Math.random()*1.6,s:0.2+Math.random()*0.8}));
+  function drawBg(){
+    const {W,H}=layout(); cx.fillStyle='#0b0f16'; cx.fillRect(0,0,W,H); cx.fillStyle='#93c5fd';
+    for(const st of stars){ st.y += st.s*0.0007*H; if(st.y>1) st.y=0; cx.globalAlpha=0.2+0.6*Math.abs(Math.sin(tNow()*0.001*st.s));
+      cx.beginPath(); cx.arc(st.x*W, st.y*H, st.r*DPR, 0, Math.PI*2); cx.fill(); }
+    cx.globalAlpha=1;
+  }
+
+  // ---------- Loop ----------
+  function loop(){
+    const now=tNow(), dt=Math.min((now-last)/1000,0.033); last=now;
+
+    // state machine
+    if(st.phase==='announce' && now>=st.nextPhaseAt) startLevel();
+    else if(st.phase==='cleared' && now>=st.nextPhaseAt) nextLevel();
+    else if(st.phase==='gameover' && now>=st.nextPhaseAt) startFromL1();
+
+    if(st.phase==='play'){
+      if(st.notePtr<lvl().m.length && (now-st.lastSpawn>lvl().spawn)){ spawnCat(); st.lastSpawn=now; }
+      physics(dt);
+      if(st.notePtr>=lvl().m.length && st.cats.length===0 && st.lasers.length===0) cleared();
+    }
+
+    // draw
+    cx.clearRect(0,0,cv.width,cv.height);
+    drawBg(); drawCats(); drawLasers();
+    const nextNote=(st.phase==='play' && st.notePtr<lvl().m.length)? lvl().m[st.notePtr] : null;
+    drawPiano(nextNote);
+
+    // HUD
+    cx.fillStyle='#e5e7eb'; cx.font=`${Math.floor(16*DPR)}px system-ui`;
+    cx.textAlign='left'; cx.textBaseline='top'; cx.fillText(`Score: ${st.score}`,10*DPR,8*DPR);
+    if(st.phase==='idle') centerText('Press Start','#a7f3d0',0.32,22);
+    else if(st.phase==='announce'){ centerText(`Level ${st.level+1}`,'#fef08a',0.30,24); centerText(LEVELS[st.level].title,'#bbf7d0',0.40,22); }
+    else if(st.phase==='cleared'){ centerText('Level Cleared! 🎉','#bbf7d0',0.35,26); }
+    else if(st.phase==='gameover'){ centerText('Game Over!','#fecaca',0.35,26); centerText('Restarting at Level 1…','#fecaca',0.46,18); }
+
+    requestAnimationFrame(loop);
+  }
+  requestAnimationFrame(loop);
+})();
+</script>
+</body></html>
